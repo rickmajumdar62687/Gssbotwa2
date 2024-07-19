@@ -1,5 +1,5 @@
 module.exports = {
-modul: {
+modul: { 
 	axios: require('axios'),
 	boom: require('@hapi/boom'),
 	baileys: require("@whiskeysockets/baileys"),
@@ -20,7 +20,6 @@ modul: {
 	google: require('google-it'),
 	googleTTS: require('google-tts-api'),
 	human: require('human-readable'),
-	jsobfus: require('javascript-obfuscator'),
 	Jimp: require('jimp'),
 	jsdom: require('jsdom'),
 	keyeddb: require('@adiwajshing/keyed-db'),

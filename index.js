@@ -1,20 +1,29 @@
-
 require('./config')
 const config = require('./config.js');
-const { default: gssConnect, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, generateForwardMessageContent, prepareWAMessageMedia, generateWAMessageFromContent, generateMessageID, downloadContentFromMessage, makeInMemoryStore, jidDecode, proto, getAggregateVotesInPollMessage } = require("@whiskeysockets/baileys")
+const { default: gssConnect, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, generateForwardMessageContent, prepareWAMessageMedia, generateWAMessageFromContent, makeCacheableSignalKeyStore, generateMessageID, downloadContentFromMessage, makeInMemoryStore, jidDecode, proto, getAggregateVotesInPollMessage } = require("@whiskeysockets/baileys")
 const pino = require('pino')
+const express = require('express')
 const { Boom } = require('@hapi/boom')
 const fs = require('fs')
+const os = require('os')
 const yargs = require('yargs/yargs')
 const chalk = require('chalk')
 const FileType = require('file-type')
 const path = require('path')
 const _ = require('lodash')
+const NodeCache = require('node-cache')
+const moment = require('moment-timezone')
 const axios = require('axios')
 const PhoneNumber = require('awesome-phonenumber')
 const { imageToWebp, videoToWebp, writeExifImg, writeExifVid } = require('./lib/exif')
 const { smsg, isUrl, generateMessageTag, getBuffer, getSizeMedia, fetchJson, await, sleep } = require('./lib/myfunc')
+const fetch = require('node-fetch');
 
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+ 
 var low
 try {
   low = require('lowdb')
@@ -22,8 +31,14 @@ try {
   low = require('./lib/lowdb')
 }
 
+const msgRetryCounterCache = new NodeCache();
+let useQR;
+let isSessionPutted;
+const sessionName = "session";
+
 const { Low, JSONFile } = low
 const mongoDB = require('./lib/mongoDB')
+const { emojis, doReact } = require('./lib/autoreact.js');
 
 global.api = (name, path = '/', query = {}, apikeyqueryname) => (name in global.APIs ? global.APIs[name] : name) + path + (query || apikeyqueryname ? '?' + new URLSearchParams(Object.entries({ ...query, ...(apikeyqueryname ? { [apikeyqueryname]: global.APIKeys[name in global.APIs ? global.APIs[name] : name] } : {}) })) : '')
 
@@ -63,30 +78,85 @@ if (global.db) setInterval(async () => {
     if (global.db.data) await global.db.write()
   }, 30 * 1000)
 
-async function startgss() {
-    const { state, saveCreds } = await useMultiFileAuthState(`./${sessionName}`)
 
+
+async function startgss() {
+  if(!process.env.SESSION_ID) {
+    useQR = true;
+    isSessionPutted = false;
+  } else {
+    useQR = false;
+    isSessionPutted = true;
+  }
+  
+    let { state, saveCreds } = await useMultiFileAuthState(sessionName);
+    let { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(chalk.red("CODED BY GOUTAM KUMAR & Ethix-Xsid"));
+    console.log(chalk.green(`using WA v${version.join(".")}, isLatest: ${isLatest}`));
+    
+ const Device = (os.platform() === 'win32') ? 'Windows' : (os.platform() === 'darwin') ? 'MacOS' : 'Linux'
     const gss = gssConnect({
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: true,
-        browser: ['gss botwa Multi Device','Safari','1.0.0'],
-        auth: state,
+        version,
+        logger: pino({ level: 'silent' }), 
+        printQRInTerminal: useQR,
+        browser: [Device, 'chrome', '121.0.6167.159'],
+        patchMessageBeforeSending: (message) => {
+            const requiresPatch = !!(
+                message.buttonsMessage ||
+                message.templateMessage ||
+                message.listMessage
+            );
+            if (requiresPatch) {
+                message = {
+                    viewOnceMessage: {
+                        message: {
+                            messageContextInfo: {
+                                deviceListMetadataVersion: 2,
+                                deviceListMetadata: {},
+                            },
+                            ...message,
+                        },
+                    },
+                };
+            }
+            return message;
+        },
+        auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" }).child({ level: "fatal" })),
+        },
         getMessage: async (key) => {
             if (store) {
                 const msg = await store.loadMessage(key.remoteJid, key.id)
                 return msg.message || undefined
             }
             return {
-                conversation: "Hai Im gss botwa"
+                conversation: "Hello World"
             }
-        }
-    })
-
+        },
+        markOnlineOnConnect: true, // set false for offline
+        generateHighQualityLinkPreview: true, // make high preview link
+        defaultQueryTimeoutMs: undefined,
+        msgRetryCounterCache
+    });
+    store?.bind(gss.ev);
+    
+     // Manage Device Loging
+ if (!gss.authState.creds.registered && isSessionPutted) {
+    const sessionID = process.env.SESSION_ID.split('Ethix-MD&')[1];
+    const pasteUrl = `https://pastebin.com/raw/${sessionID}`;
+    const response = await fetch(pasteUrl);
+    const text = await response.text();
+    if (typeof text === 'string') {
+      fs.writeFileSync('./session/creds.json', text);
+      console.log('session file created')
+      await startgss()
+    }
+  }
     store.bind(gss.ev)
     
 
-
-    gss.ev.on('messages.upsert', async chatUpdate => {
+gss.ev.on('messages.upsert', async chatUpdate => {
         //console.log(JSON.stringify(chatUpdate, undefined, 2))
         try {
         mek = chatUpdate.messages[0]
@@ -102,7 +172,24 @@ async function startgss() {
             console.log(err)
         }
     })
-    
+
+
+
+
+gss.ev.on('messages.upsert', async chatUpdate => {
+  try {
+    if (global.autoreact) {
+      const mek = chatUpdate.messages[0];
+      console.log(mek);
+      if (mek.message && !mek.key.fromMe) {
+        const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+        await doReact(randomEmoji, mek, gss);
+      }
+    }
+  } catch (err) {
+    console.error('Error during auto reaction:', err);
+  }
+});
 
 
 
@@ -135,9 +222,8 @@ gss.ev.on('messages.update', async chatUpdate => {
                     message: pollCreation,
                     pollUpdates: update.pollUpdates,
                 });
-                var toCmd = pollUpdate.filter(v => v.voters.length !== 0)[0]?.name;
-                if (toCmd == undefined) return;
-                var prefCmd = prefix + toCmd;
+                const tocommand = pollUpdate.filter(v => v.voters.length !== 0)[0]?.name;
+                if (!tocommand) return;
 
                 try {
                     setTimeout(async () => {
@@ -147,15 +233,78 @@ gss.ev.on('messages.update', async chatUpdate => {
                     console.error("Error deleting message:", error);
                 }
 
-                gss.appenTextMessage(prefCmd, chatUpdate);
+                gss.appenTextMessage(tocommand, chatUpdate);
             }
         }
     }
 });
 
+ 
 
+/*WELCOME LEFT*/
+gss.ev.on('group-participants.update', async (anu) => {
+    if (global.welcome) {
+        console.log(anu);
+        try {
+            let metadata = await gss.groupMetadata(anu.id);
+            let participants = anu.participants;
 
-	
+            for (let num of participants) {
+                try {
+                    ppuser = await gss.profilePictureUrl(num, 'image');
+                } catch (err) {
+                    ppuser = 'https://cdn.pixabay.com/photo/2015/10/05/22/37/blank-profile-picture-973460_960_720.png?q=60';
+                }
+
+                // Welcome message
+                if (anu.action == 'add') {
+                    const userName = num.split('@')[0];
+                    const joinTime = moment.tz('Asia/Kolkata').format('HH:mm:ss');
+                    const joinDate = moment.tz('Asia/Kolkata').format('DD/MM/YYYY');
+                    const membersCount = metadata.participants.length;
+
+                    const welcomeMessage = `> Hello @${userName}! Welcome to *${metadata.subject}*.\n> You are the ${membersCount}th member.\n> Joined at: ${joinTime} on ${joinDate}`;
+
+                    gss.sendMessage(anu.id, {
+                        text: welcomeMessage,
+                        contextInfo: {
+                            externalAdReply: {
+                                showAdAttribution: false,
+                                title: userName,
+                                sourceUrl: ppuser,
+                                body: `${metadata.subject}`
+                            }
+                        }
+                    });
+                }
+                // Left message
+                else if (anu.action == 'remove') {
+                    const userName = num.split('@')[0];
+                    const leaveTime = moment.tz('Asia/Kolkata').format('HH:mm:ss');
+                    const leaveDate = moment.tz('Asia/Kolkata').format('DD/MM/YYYY');
+                    const membersCount = metadata.participants.length;
+
+                    const leftMessage = `> Goodbye @${userName} from ${metadata.subject}.\n> We are now ${membersCount} in the group.\n> Left at: ${leaveTime} on ${leaveDate}`;
+
+                    gss.sendMessage(anu.id, {
+                        text: leftMessage,
+                        contextInfo: {
+                            externalAdReply: {
+                                showAdAttribution: false,
+                                title: userName,
+                                sourceUrl: ppuser,
+                                body: `${metadata.subject}`
+                            }
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            console.log(err);
+        }
+    }
+});
+
 	
     // Setting
     gss.decodeJid = (jid) => {
@@ -196,7 +345,7 @@ gss.ev.on('messages.update', async chatUpdate => {
 	for (let i of kon) {
 	    list.push({
 	    	displayName: await gss.getName(i + '@s.whatsapp.net'),
-	    	vcard: `BEGIN:VCARD\nVERSION:3.0\nN:${await gss.getName(i + '@s.whatsapp.net')}\nFN:${await gss.getName(i + '@s.whatsapp.net')}\nitem1.TEL;waid=${i}:${i}\nitem1.X-ABLabel:Ponsel\nitem2.EMAIL;type=INTERNET:bsid4961@gmail.com\nitem2.X-ABLabel:Email\nEND:VCARD`
+	    	vcard: `BEGIN:VCARD\nVERSION:3.0\nN:${await gss.getName(i + '@s.whatsapp.net')}\nFN:${await gss.getName(i + '@s.whatsapp.net')}\nitem1.TEL;waid=${i}:${i}\nitem1.X-ABLabel:Phone\nEND:VCARD`
 	    })
 	}
 	gss.sendMessage(jid, { contacts: { displayName: `${list.length} Kontak`, contacts: list }, ...opts }, { quoted })
@@ -242,7 +391,7 @@ gss.ev.on('messages.update', async chatUpdate => {
     } else if (connection === "open") {
         // Add your custom message when the connection is open
         console.log('Connected...', update);
-        gss.sendMessage('917050906659@s.whatsapp.net', {
+        gss.sendMessage(gss.user.id, {
             text: `*hi bro! 🫡*\n_gss botwa v2 bot has successfully connected to the server_`
         });
     }
@@ -558,7 +707,7 @@ gss.ev.on('messages.update', async chatUpdate => {
 	    size: await getSizeMedia(data),
             ...type,
             data
-        }
+        } 
 
     }
 
@@ -566,12 +715,10 @@ gss.ev.on('messages.update', async chatUpdate => {
 }
 
 startgss()
+app.get('/', (req, res) => {
+  res.send('Hello World!');
+});
 
-
-let file = require.resolve(__filename)
-fs.watchFile(file, () => {
-	fs.unwatchFile(file)
-	console.log(chalk.redBright(`Update ${__filename}`))
-	delete require.cache[file]
-	require(file)
-})
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
